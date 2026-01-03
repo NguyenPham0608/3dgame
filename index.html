@@ -158,6 +158,10 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.getElementById('game-container').appendChild(renderer.domElement);
+        const canvas = renderer.domElement;
+        canvas.addEventListener('click', () => {
+            canvas.style.cursor = 'none';
+        });
 
 
 
@@ -1158,7 +1162,12 @@
             state.mousePos.x = ((event.clientX / window.innerWidth) * 2 - 1);
             state.mousePos.y = (-(event.clientY / window.innerHeight) * 2 + 1);
 
-            raycaster.setFromCamera(state.mousePos, camera);
+            const shootTarget = {
+                x: 0,
+                y: 0,
+            };
+
+            raycaster.setFromCamera(shootTarget, camera);
 
             // Get all blob meshes
             const blobMeshes = state.blobs.map(b => b.mesh);
