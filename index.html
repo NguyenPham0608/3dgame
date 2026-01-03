@@ -285,7 +285,7 @@
                 toPlayer.y = 0;
                 toPlayer.normalize().multiplyScalar(0.01);
                 this.velocity.add(toPlayer);
-                this.velocity.multiplyScalar(0.98);
+                this.velocity.multiplyScalar(0.8);
 
                 this.position.add(this.velocity);
                 this.position.y = this.baseScale * 0.8;
