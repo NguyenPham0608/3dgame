@@ -619,7 +619,80 @@
                 });
                 this.outerTrail = new THREE.Line(this.outerTrailGeometry, this.outerTrailMaterial);
                 scene.add(this.outerTrail);
+                // Persistent smooth ribbon trail (for level 5)
+                this.persistentRibbonPoints = [];
+                this.ribbonMeshes = [];
+                if (config.level === 5) {
+                    const ribbonLayers = [
+                        { radius: 0.12, color: config.coreColor, opacity: 1.0 },
+                        { radius: 0.25, color: config.primaryColor, opacity: 0.8 },
+                        { radius: 0.45, color: config.glowColors[1], opacity: 0.5 },
+                        { radius: 0.7, color: config.glowColors[2], opacity: 0.25 }
+                    ];
 
+                    ribbonLayers.forEach(layer => {
+                        // Custom shader material for distance-based fading
+                        const ribbonMat = new THREE.ShaderMaterial({
+                            uniforms: {
+                                color: { value: new THREE.Color(layer.color) },
+                                baseOpacity: { value: layer.opacity },
+                                fadeProgress: { value: 0.0 } // 0 = full trail, 1 = fully faded
+                            },
+                            vertexShader: `
+                                varying float vT;
+                                varying vec3 vNormal;
+                                void main() {
+                                    vT = uv.x; // Position along tube (0 = head, 1 = tail)
+                                    vNormal = normalize(normalMatrix * normal);
+                                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                                }
+                            `,
+                            fragmentShader: `
+                                uniform vec3 color;
+                                uniform float baseOpacity;
+                                uniform float fadeProgress;
+                                varying float vT;
+                                varying vec3 vNormal;
+                                void main() {
+                                    // vT: 0 = tail (oldest/start), 1 = head (newest/end)
+                                    
+                                    // Distance-based fade: head is bright, tail is dimmer
+                                    float distanceFade = pow(vT, 1.5);
+                                    
+                                    // Progressive fade from tail to head
+                                    // As fadeProgress increases, the cutoff moves from tail (0) toward head (1)
+                                    float cutoff = fadeProgress;
+                                    float progressFade = smoothstep(cutoff - 0.15, cutoff + 0.05, vT);
+                                    
+                                    // Add some rim lighting for 3D effect
+                                    vec3 viewDir = vec3(0.0, 0.0, 1.0);
+                                    float rim = 1.0 - abs(dot(vNormal, viewDir));
+                                    rim = pow(rim, 2.0) * 0.5 + 0.5;
+                                    
+                                    // Combine all fades
+                                    float alpha = baseOpacity * distanceFade * progressFade;
+                                    
+                                    // Brighten edges slightly for glow
+                                    vec3 finalColor = color * (0.8 + rim * 0.4);
+                                    
+                                    gl_FragColor = vec4(finalColor, alpha);
+                                }
+                            `,
+                            transparent: true,
+                            side: THREE.DoubleSide,
+                            depthWrite: false,
+                            blending: THREE.AdditiveBlending
+                        });
+                        this.ribbonMeshes.push({
+                            material: ribbonMat,
+                            mesh: null,
+                            radius: layer.radius,
+                            baseOpacity: layer.opacity
+                        });
+                    });
+                }
+                this.ribbonFadeTime = 0;
+                this.ribbonFadeDuration = config.persistentTrailFade || 0;
                 // Trail particles that fall off
                 this.trailParticles = [];
 
@@ -697,7 +770,87 @@
                     zigzag.geometry.setFromPoints(points);
                 });
             }
+            buildTubeGeometry(points, radius, radialSegments = 12) {
+                if (points.length < 2) return null;
 
+                const vertices = [];
+                const indices = [];
+                const uvs = []; // UV.x will store position along tube (0 = head, 1 = tail)
+
+                const totalLength = points.length - 1;
+
+                for (let i = 0; i < points.length; i++) {
+                    const point = points[i];
+                    const t = i / totalLength; // 0 at start (newest), 1 at end (oldest)
+
+                    // Calculate direction for this segment
+                    let tangent;
+                    if (i === 0) {
+                        tangent = new THREE.Vector3().subVectors(points[1], points[0]).normalize();
+                    } else if (i === points.length - 1) {
+                        tangent = new THREE.Vector3().subVectors(points[i], points[i - 1]).normalize();
+                    } else {
+                        tangent = new THREE.Vector3().subVectors(points[i + 1], points[i - 1]).normalize();
+                    }
+
+                    // Create perpendicular vectors for the circle
+                    let perp1 = new THREE.Vector3(1, 0, 0);
+                    if (Math.abs(tangent.dot(perp1)) > 0.9) {
+                        perp1.set(0, 1, 0);
+                    }
+                    perp1.crossVectors(tangent, perp1).normalize();
+                    const perp2 = new THREE.Vector3().crossVectors(tangent, perp1).normalize();
+
+                    // Aggressive taper - starts full at head, shrinks to near-zero at tail
+                    const taper = Math.pow(1 - t, 0.4); // Faster falloff
+                    const r = radius * taper;
+
+                    // Add vertices around the circle
+                    for (let j = 0; j < radialSegments; j++) {
+                        const angle = (j / radialSegments) * Math.PI * 2;
+                        const cos = Math.cos(angle);
+                        const sin = Math.sin(angle);
+
+                        vertices.push(
+                            point.x + perp1.x * cos * r + perp2.x * sin * r,
+                            point.y + perp1.y * cos * r + perp2.y * sin * r,
+                            point.z + perp1.z * cos * r + perp2.z * sin * r
+                        );
+
+                        // Store t (position along tube) in UV
+                        uvs.push(t, j / radialSegments);
+                    }
+
+                    // Add triangle indices connecting to previous ring
+                    if (i > 0) {
+                        const currRing = i * radialSegments;
+                        const prevRing = (i - 1) * radialSegments;
+
+                        for (let j = 0; j < radialSegments; j++) {
+                            const nextJ = (j + 1) % radialSegments;
+
+                            indices.push(
+                                prevRing + j,
+                                prevRing + nextJ,
+                                currRing + j
+                            );
+                            indices.push(
+                                prevRing + nextJ,
+                                currRing + nextJ,
+                                currRing + j
+                            );
+                        }
+                    }
+                }
+
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+                geometry.setIndex(indices);
+                geometry.computeVertexNormals();
+
+                return geometry;
+            }
             createImpact() {
                 // Big flash
                 this.impactFlash = new THREE.PointLight(this.config.primaryColor, 8 * this.config.glowIntensity, 15);
@@ -860,9 +1013,44 @@
                     }
 
                     if (this.trailPoints.length > 1) {
-                        this.trailGeometry.setFromPoints(this.trailPoints);
-                        this.innerTrailGeometry.setFromPoints(this.trailPoints);
-                        this.outerTrailGeometry.setFromPoints(this.trailPoints);
+                        // Hide line trails for level 5 (uses tube instead)
+                        if (this.config.level === 5) {
+                            this.trail.visible = true;
+                            this.innerTrail.visible = false;
+                            this.outerTrail.visible = false;
+                        } else {
+                            this.trailGeometry.setFromPoints(this.trailPoints);
+                            this.innerTrailGeometry.setFromPoints(this.trailPoints);
+                            this.outerTrailGeometry.setFromPoints(this.trailPoints);
+                        }
+                    }
+                    // Update persistent ribbon for level 5
+                    // Update persistent ribbon for level 5
+                    // Update persistent ribbon for level 5
+                    if (this.config.level === 5) {
+                        // Always keep the first point at the projectile
+                        this.persistentRibbonPoints.unshift(corePos.clone());
+
+                        // Limit trail length - remove old points from the tail
+                        const maxTrailPoints = 40;
+                        while (this.persistentRibbonPoints.length > maxTrailPoints) {
+                            this.persistentRibbonPoints.pop();
+                        }
+
+                        // Rebuild ribbon meshes every frame to stay attached
+                        if (this.persistentRibbonPoints.length > 1) {
+                            this.ribbonMeshes.forEach(ribbon => {
+                                if (ribbon.mesh) {
+                                    scene.remove(ribbon.mesh);
+                                    ribbon.mesh.geometry.dispose();
+                                }
+                                const geo = this.buildTubeGeometry(this.persistentRibbonPoints, ribbon.radius, 12);
+                                if (geo) {
+                                    ribbon.mesh = new THREE.Mesh(geo, ribbon.material);
+                                    scene.add(ribbon.mesh);
+                                }
+                            });
+                        }
                     }
 
                     // Spawn trail particles that fall off
@@ -887,6 +1075,18 @@
                 } else {
                     // Fade out phase
                     this.fadeLife -= deltaTime;
+                    // Fade the persistent ribbon
+                    // Fade the persistent ribbon progressively from tail to head
+                    if (this.config.level === 5 && this.ribbonFadeDuration > 0) {
+                        this.ribbonFadeTime += deltaTime;
+                        const fadeProgress = Math.min(1, this.ribbonFadeTime / this.ribbonFadeDuration);
+
+                        this.ribbonMeshes.forEach(ribbon => {
+                            if (ribbon.mesh && ribbon.material.uniforms) {
+                                ribbon.material.uniforms.fadeProgress.value = fadeProgress;
+                            }
+                        });
+                    }
                     const alpha = Math.max(0, this.fadeLife / this.originalFadeLife);
 
                     // Fade core
@@ -961,6 +1161,10 @@
                     return true;
                 });
 
+                // Keep alive longer for ribbon fade
+                if (this.config.level === 5 && this.ribbonFadeDuration > 0) {
+                    return this.hasHit ? (this.fadeLife > 0 || this.ribbonFadeTime < this.ribbonFadeDuration) : true;
+                }
                 return this.hasHit ? this.fadeLife > 0 : true;
             }
 
@@ -1017,6 +1221,14 @@
                         p.geometry.dispose();
                         p.material.dispose();
                     }
+                });
+                // Clean up ribbon meshes
+                this.ribbonMeshes.forEach(ribbon => {
+                    if (ribbon.mesh) {
+                        scene.remove(ribbon.mesh);
+                        ribbon.mesh.geometry.dispose();
+                    }
+                    ribbon.material.dispose();
                 });
             }
         }
@@ -1228,8 +1440,9 @@
                 glowIntensity: 6.5,
                 fadeDuration: 6.5,
                 shakeIntensity: 0.35,
-                particleEmissionRate: 1.0,  // Always emit per frame
+                particleEmissionRate: 1.0,
                 level: 5,
+                persistentTrailFade: 1.0,  // ADD THIS - seconds for ribbon to fade
                 name: '☢️ Green Nuke'
             },
         };
@@ -1294,9 +1507,45 @@
             state.mousePos.y = -(event.clientY / window.innerHeight) * 2 + 1;
             raycaster.setFromCamera(state.mousePos, camera);
             const blobMeshes = state.blobs.map(b => b.mesh);
-            const mainRayOrigin = camera.position.clone();
-            const mainRayDir = raycaster.ray.direction.clone();
+
             const config = laserConfigs[state.level];
+
+            // For level 5, start higher and arc down to target
+            let mainRayOrigin;
+            let mainRayDir;
+
+            if (config.level === 5) {
+                const heightOffset = 0.3; // How much higher to start
+                mainRayOrigin = camera.position.clone();
+                mainRayOrigin.y += heightOffset;
+
+                // Get the target point (where mouse is aiming)
+                const tempRc = new THREE.Raycaster();
+                tempRc.setFromCamera(state.mousePos, camera);
+
+                // Find target on ground or blob
+                const intersects = tempRc.intersectObjects(blobMeshes, false);
+                let targetPoint;
+
+                if (intersects.length > 0) {
+                    targetPoint = intersects[0].point;
+                } else {
+                    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+                    const intersection = new THREE.Vector3();
+                    if (tempRc.ray.intersectPlane(groundPlane, intersection) && intersection.distanceTo(camera.position) < 80) {
+                        targetPoint = intersection;
+                    } else {
+                        targetPoint = camera.position.clone().add(tempRc.ray.direction.clone().multiplyScalar(80));
+                    }
+                }
+
+                // Direction from elevated start to target
+                mainRayDir = new THREE.Vector3().subVectors(targetPoint, mainRayOrigin).normalize();
+            } else {
+                mainRayOrigin = camera.position.clone();
+                mainRayDir = raycaster.ray.direction.clone();
+            }
+
             for (let rayIdx = 0; rayIdx < config.numRays; rayIdx++) {
                 let rayDir = mainRayDir.clone();
                 if (config.numRays > 1 && config.spreadAngle > 0) {
