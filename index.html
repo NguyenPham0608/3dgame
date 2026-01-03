@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blob Zapper</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        #game-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 30px;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        #crosshair::before,
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(200, 100, 255, 0.8);
+            box-shadow: 0 0 10px #a855f7, 0 0 20px #7c3aed;
+        }
+
+        #crosshair::before {
+            width: 2px;
+            height: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        #crosshair::after {
+            width: 100%;
+            height: 2px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        #hud {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            z-index: 100;
+            text-shadow: 0 0 10px rgba(168, 85, 247, 0.8);
+        }
+
+        #hud h1 {
+            font-size: 24px;
+            color: #a855f7;
+            margin-bottom: 10px;
+        }
+
+        #score,
+        #blobs-remaining {
+            font-size: 18px;
+            margin: 5px 0;
+        }
+
+        #instructions {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            z-index: 100;
+        }
+
+        #wave-announcement {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #a855f7;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 0 0 20px #a855f7, 0 0 40px #7c3aed;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 100;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="game-container"></div>
+    <div id="crosshair"></div>
+    <div id="hud">
+        <h1>⚡ BLOB ZAPPER ⚡</h1>
+        <div id="score">Score: 0</div>
+        <div id="blobs-remaining">Blobs: 0</div>
+    </div>
+    <div id="instructions">
+        WASD to move • Mouse to aim • Click to shoot • Zap all the blobs!
+    </div>
+    <div id="wave-announcement"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // Game state
+        const state = {
+            score: 0,
+            wave: 0,
+            blobs: [],
+            explosions: [],
+            lasers: [],
+            keys: { w: false, a: false, s: false, d: false },
+            playerAngle: 0,
+            playerPos: new THREE.Vector3(0, 1.5, 0),
+            mousePos: new THREE.Vector2()
+        };
+
+        const MOUSE_SENSITIVITY = 2.5;
+
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a1a);
+        scene.fog = new THREE.FogExp2(0x0a0a1a, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.getElementById('game-container').appendChild(renderer.domElement);
+
+
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404060, 0.5);
+        scene.add(ambientLight);
+
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1);
+        mainLight.position.set(10, 20, 10);
+        mainLight.castShadow = true;
+        mainLight.shadow.mapSize.width = 2048;
+        mainLight.shadow.mapSize.height = 2048;
+        mainLight.shadow.camera.near = 0.5;
+        mainLight.shadow.camera.far = 50;
+        mainLight.shadow.camera.left = -30;
+        mainLight.shadow.camera.right = 30;
+        mainLight.shadow.camera.top = 30;
+        mainLight.shadow.camera.bottom = -30;
+        scene.add(mainLight);
+
+        // Purple point light for atmosphere
+        const purpleLight = new THREE.PointLight(0x8b5cf6, 1, 50);
+        purpleLight.position.set(0, 10, 0);
+        scene.add(purpleLight);
+
+        // Ground
+        const groundGeometry = new THREE.PlaneGeometry(100, 100, 50, 50);
+        const groundMaterial = new THREE.MeshStandardMaterial({
+            color: 0x1a1a2e,
+            roughness: 0.8,
+            metalness: 0.2
+        });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Grid helper for visual reference
+        const gridHelper = new THREE.GridHelper(100, 50, 0x2a2a4a, 0x1a1a3a);
+        gridHelper.position.y = 0.01;
+        scene.add(gridHelper);
+
+        // Blob class
+        class Blob {
+            constructor(position) {
+                this.position = position.clone();
+                this.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.05,
+                    0,
+                    (Math.random() - 0.5) * 0.05
+                );
+                this.baseScale = 0.8 + Math.random() * 0.6;
+                this.health = 1;
+                this.time = Math.random() * Math.PI * 2;
+                this.pulseSpeed = 1 + Math.random() * 0.5;
+
+                // Create blob mesh with organic shape
+                const geometry = new THREE.SphereGeometry(1, 32, 32);
+
+                // Deform vertices for organic look
+                const positions = geometry.attributes.position;
+                this.originalPositions = positions.array.slice();
+
+                for (let i = 0; i < positions.count; i++) {
+                    const x = positions.getX(i);
+                    const y = positions.getY(i);
+                    const z = positions.getZ(i);
+                    const noise = 0.1 * (Math.sin(x * 5) * Math.cos(y * 5) * Math.sin(z * 5));
+                    positions.setXYZ(i, x + noise * x, y + noise * y, z + noise * z);
+                }
+
+                // Evil blob colors - sickly greens and reds
+                const hue = Math.random() > 0.5 ? 0.0 + Math.random() * 0.1 : 0.25 + Math.random() * 0.1;
+                const color = new THREE.Color().setHSL(hue, 0.8, 0.4);
+
+                this.material = new THREE.MeshStandardMaterial({
+                    color: color,
+                    roughness: 0.3,
+                    metalness: 0.1,
+                    emissive: color,
+                    emissiveIntensity: 0.2
+                });
+
+                this.mesh = new THREE.Mesh(geometry, this.material);
+                this.mesh.position.copy(this.position);
+                this.mesh.scale.setScalar(this.baseScale);
+                this.mesh.castShadow = true;
+                this.mesh.receiveShadow = true;
+                this.mesh.userData.blob = this;
+
+                scene.add(this.mesh);
+            }
+
+            update(deltaTime, playerPos) {
+                this.time += deltaTime * this.pulseSpeed;
+
+                // Elastic pulsing animation
+                const pulseX = 1 + Math.sin(this.time * 3) * 0.1;
+                const pulseY = 1 + Math.sin(this.time * 3 + Math.PI / 2) * 0.15;
+                const pulseZ = 1 + Math.sin(this.time * 3 + Math.PI) * 0.1;
+                this.mesh.scale.set(
+                    this.baseScale * pulseX,
+                    this.baseScale * pulseY,
+                    this.baseScale * pulseZ
+                );
+
+                // Wobble vertices for elastic effect
+                const positions = this.mesh.geometry.attributes.position;
+                for (let i = 0; i < positions.count; i++) {
+                    const ox = this.originalPositions[i * 3];
+                    const oy = this.originalPositions[i * 3 + 1];
+                    const oz = this.originalPositions[i * 3 + 2];
+
+                    const wobble = Math.sin(this.time * 2 + ox * 3 + oy * 3 + oz * 3) * 0.05;
+                    positions.setXYZ(i,
+                        ox * (1 + wobble),
+                        oy * (1 + wobble * 1.5),
+                        oz * (1 + wobble)
+                    );
+                }
+                positions.needsUpdate = true;
+
+                // Move towards player slowly
+                const toPlayer = new THREE.Vector3().subVectors(playerPos, this.position);
+                toPlayer.y = 0;
+                toPlayer.normalize().multiplyScalar(0.01);
+                this.velocity.add(toPlayer);
+                this.velocity.multiplyScalar(0.98);
+
+                this.position.add(this.velocity);
+                this.position.y = this.baseScale * 0.8;
+                this.mesh.position.copy(this.position);
+
+                // Bounce animation
+                this.mesh.position.y += Math.abs(Math.sin(this.time * 2)) * 0.2;
+            }
+
+            destroy() {
+                scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.material.dispose();
+            }
+        }
+
+        // Voronoi explosion fragment
+        class ExplosionFragment {
+            constructor(position, color, velocity, size = 1) {
+                // Create irregular polygon shape for voronoi-like fragments
+                const shape = new THREE.Shape();
+                const points = 5 + Math.floor(Math.random() * 3);
+                const baseSize = (0.1 + Math.random() * 0.2) * size;
+
+                for (let i = 0; i < points; i++) {
+                    const angle = (i / points) * Math.PI * 2;
+                    const radius = baseSize * (0.7 + Math.random() * 0.6);
+                    const x = Math.cos(angle) * radius;
+                    const y = Math.sin(angle) * radius;
+                    if (i === 0) shape.moveTo(x, y);
+                    else shape.lineTo(x, y);
+                }
+                shape.closePath();
+
+                const extrudeSettings = {
+                    depth: (0.05 + Math.random() * 0.1) * size,
+                    bevelEnabled: false
+                };
+
+                const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+                const material = new THREE.MeshStandardMaterial({
+                    color: color,
+                    roughness: 0.4,
+                    metalness: 0.3,
+                    emissive: color,
+                    emissiveIntensity: 0.5
+                });
+
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.position.copy(position);
+                this.mesh.rotation.set(
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI
+                );
+
+                this.velocity = velocity.clone();
+                this.angularVelocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 10,
+                    (Math.random() - 0.5) * 10,
+                    (Math.random() - 0.5) * 10
+                );
+                this.life = 1;
+                this.gravity = -15;
+
+                scene.add(this.mesh);
+            }
+
+            update(deltaTime) {
+                this.velocity.y += this.gravity * deltaTime;
+                this.mesh.position.add(this.velocity.clone().multiplyScalar(deltaTime));
+
+                this.mesh.rotation.x += this.angularVelocity.x * deltaTime;
+                this.mesh.rotation.y += this.angularVelocity.y * deltaTime;
+                this.mesh.rotation.z += this.angularVelocity.z * deltaTime;
+
+                // Bounce off ground
+                if (this.mesh.position.y < 0.1) {
+                    this.mesh.position.y = 0.1;
+                    this.velocity.y *= -0.5;
+                    this.velocity.x *= 0.8;
+                    this.velocity.z *= 0.8;
+                    this.angularVelocity.multiplyScalar(0.8);
+                }
+
+                this.life -= deltaTime * 0.5;
+                this.mesh.material.opacity = this.life;
+                this.mesh.material.transparent = true;
+
+                return this.life > 0;
+            }
+
+            destroy() {
+                scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.mesh.material.dispose();
+            }
+        }
+
+        // Shockwave ring effect
+        class ShockwaveRing {
+            constructor(position, color) {
+                const geometry = new THREE.RingGeometry(0.1, 0.3, 32);
+                const material = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.8,
+                    side: THREE.DoubleSide
+                });
+
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.position.copy(position);
+                this.mesh.position.y = 0.1;
+                this.mesh.rotation.x = -Math.PI / 2;
+
+                this.life = 1;
+                this.expandSpeed = 15;
+                this.maxRadius = 8;
+                this.currentRadius = 0.1;
+
+                scene.add(this.mesh);
+            }
+
+            update(deltaTime) {
+                this.currentRadius += this.expandSpeed * deltaTime;
+                this.life -= deltaTime * 1.5;
+
+                const innerRadius = this.currentRadius;
+                const outerRadius = this.currentRadius + 0.5 * this.life;
+
+                this.mesh.geometry.dispose();
+                this.mesh.geometry = new THREE.RingGeometry(innerRadius, outerRadius, 32);
+                this.mesh.material.opacity = this.life * 0.6;
+
+                return this.life > 0 && this.currentRadius < this.maxRadius;
+            }
+
+            destroy() {
+                scene.remove(this.mesh);
+                this.mesh.geometry.dispose();
+                this.mesh.material.dispose();
+            }
+        }
+
+        // Explosion spark particle
+        class ExplosionSpark {
+            constructor(position, color, velocity) {
+                const geometry = new THREE.SphereGeometry(0.03 + Math.random() * 0.05, 6, 6);
+                const material = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 1
+                });
+
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.position.copy(position);
+                this.velocity = velocity;
+                this.life = 0.5 + Math.random() * 0.5;
+                this.gravity = -8;
+
+                // Trail points
+                this.trail = [];
+                this.maxTrailLength = 10;
+
+                scene.add(this.mesh);
+
+                // Trail line
+                this.trailGeometry = new THREE.BufferGeometry();
+                this.trailMaterial = new THREE.LineBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.5
+                });
+                this.trailLine = new THREE.Line(this.trailGeometry, this.trailMaterial);
+                scene.add(this.trailLine);
+            }
+
+            update(deltaTime) {
+                // Store trail point
+                this.trail.unshift(this.mesh.position.clone());
+                if (this.trail.length > this.maxTrailLength) {
+                    this.trail.pop();
+                }
+
+                // Update trail geometry
+                if (this.trail.length > 1) {
+                    this.trailGeometry.setFromPoints(this.trail);
+                }
+
+                this.velocity.y += this.gravity * deltaTime;
+                this.mesh.position.add(this.velocity.clone().multiplyScalar(deltaTime));
+
+                this.life -= deltaTime;
+                const alpha = Math.max(0, this.life * 2);
+                this.mesh.material.opacity = alpha;
+                this.trailMaterial.opacity = alpha * 0.5;
+                this.mesh.scale.setScalar(alpha);
+
+                return this.life > 0;
+            }
+
+            destroy() {
+                scene.remove(this.mesh);
+                scene.remove(this.trailLine);
+                this.mesh.geometry.dispose();
+                this.mesh.material.dispose();
+                this.trailGeometry.dispose();
+                this.trailMaterial.dispose();
+            }
+        }
+
+        // Explosion light flash
+        class ExplosionFlash {
+            constructor(position, color, intensity = 10, radius = 15) {
+                this.light = new THREE.PointLight(color, intensity, radius);
+                this.light.position.copy(position);
+                this.life = 1;
+                this.initialIntensity = intensity;
+                scene.add(this.light);
+            }
+
+            update(deltaTime) {
+                this.life -= deltaTime * 3;
+                this.light.intensity = this.initialIntensity * Math.max(0, this.life);
+                return this.life > 0;
+            }
+
+            destroy() {
+                scene.remove(this.light);
+            }
+        }
+
+        // Electric laser beam - spell-like with traveling core
+        class LaserBeam {
+            constructor(start, end) {
+                this.start = start.clone();
+                this.end = end.clone();
+                this.direction = new THREE.Vector3().subVectors(end, start);
+                this.length = this.direction.length();
+                this.direction.normalize();
+
+                this.travelProgress = 0;
+                this.travelSpeed = 80; // Units per second
+                this.hasHit = false;
+                this.fadeLife = 0.4;
+                this.time = 0;
+
+                // Glowing core orb - the traveling spell projectile
+                const coreGeometry = new THREE.SphereGeometry(0.15, 16, 16);
+                const coreMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xd8b4fe,
+                    transparent: true,
+                    opacity: 1
+                });
+                this.coreOrb = new THREE.Mesh(coreGeometry, coreMaterial);
+                this.coreOrb.position.copy(start);
+                scene.add(this.coreOrb);
+
+                // Inner bright core
+                const innerGeometry = new THREE.SphereGeometry(0.08, 12, 12);
+                const innerMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 1
+                });
+                this.innerCore = new THREE.Mesh(innerGeometry, innerMaterial);
+                this.coreOrb.add(this.innerCore);
+
+                // Outer glow layers
+                this.glowLayers = [];
+                const glowSizes = [0.25, 0.35, 0.5];
+                const glowOpacities = [0.5, 0.3, 0.15];
+                const glowColors = [0xc084fc, 0xa855f7, 0x7c3aed];
+
+                glowSizes.forEach((size, i) => {
+                    const glowGeo = new THREE.SphereGeometry(size, 12, 12);
+                    const glowMat = new THREE.MeshBasicMaterial({
+                        color: glowColors[i],
+                        transparent: true,
+                        opacity: glowOpacities[i],
+                        side: THREE.BackSide
+                    });
+                    const glow = new THREE.Mesh(glowGeo, glowMat);
+                    this.coreOrb.add(glow);
+                    this.glowLayers.push(glow);
+                });
+
+                // Point light attached to core
+                this.coreLight = new THREE.PointLight(0xa855f7, 3, 8);
+                this.coreOrb.add(this.coreLight);
+
+                // Trail beam that follows behind the core - ENHANCED
+                this.trailPoints = [];
+                this.maxTrailLength = 50;
+
+                // Main bright trail
+                this.trailGeometry = new THREE.BufferGeometry();
+                this.trailMaterial = new THREE.LineBasicMaterial({
+                    color: 0xd8b4fe,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                this.trail = new THREE.Line(this.trailGeometry, this.trailMaterial);
+                scene.add(this.trail);
+
+                // Inner trail (white hot core)
+                this.innerTrailGeometry = new THREE.BufferGeometry();
+                this.innerTrailMaterial = new THREE.LineBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 1
+                });
+                this.innerTrail = new THREE.Line(this.innerTrailGeometry, this.innerTrailMaterial);
+                scene.add(this.innerTrail);
+
+                // Outer glow trail
+                this.outerTrailGeometry = new THREE.BufferGeometry();
+                this.outerTrailMaterial = new THREE.LineBasicMaterial({
+                    color: 0x7c3aed,
+                    transparent: true,
+                    opacity: 0.5
+                });
+                this.outerTrail = new THREE.Line(this.outerTrailGeometry, this.outerTrailMaterial);
+                scene.add(this.outerTrail);
+
+                // Trail particles that fall off
+                this.trailParticles = [];
+
+                // Zigzag electric particles that travel with and around the core
+                this.zigzags = [];
+                this.createZigzags();
+
+                // Sparkle particles trailing behind
+                this.sparkles = [];
+
+                // Impact effects (created on hit)
+                this.impactParticles = [];
+                this.impactFlash = null;
+            }
+
+            createZigzags() {
+                const numZigzags = 4;
+
+                for (let i = 0; i < numZigzags; i++) {
+                    const zigzag = {
+                        points: [],
+                        geometry: new THREE.BufferGeometry(),
+                        material: new THREE.LineBasicMaterial({
+                            color: i % 2 === 0 ? 0xe9d5ff : 0x7c3aed,
+                            transparent: true,
+                            opacity: 0.7
+                        }),
+                        offset: (i / numZigzags) * Math.PI * 2,
+                        radius: 0.3 + Math.random() * 0.2,
+                        speed: 8 + Math.random() * 4
+                    };
+                    zigzag.line = new THREE.Line(zigzag.geometry, zigzag.material);
+                    scene.add(zigzag.line);
+                    this.zigzags.push(zigzag);
+                }
+            }
+
+            updateZigzags(corePos) {
+                this.zigzags.forEach((zigzag, idx) => {
+                    const points = [];
+                    const numPoints = 8;
+
+                    for (let i = 0; i < numPoints; i++) {
+                        const t = i / (numPoints - 1);
+                        const trailOffset = t * 2; // How far back along trail
+
+                        // Get position along trail
+                        const basePos = corePos.clone().sub(
+                            this.direction.clone().multiplyScalar(trailOffset)
+                        );
+
+                        // Add zigzag displacement perpendicular to direction
+                        const angle = this.time * zigzag.speed + zigzag.offset + t * 6;
+                        const perpX = new THREE.Vector3(1, 0, 0);
+                        const perpY = new THREE.Vector3(0, 1, 0);
+
+                        // Create perpendicular vectors
+                        if (Math.abs(this.direction.y) < 0.9) {
+                            perpX.crossVectors(this.direction, new THREE.Vector3(0, 1, 0)).normalize();
+                        } else {
+                            perpX.crossVectors(this.direction, new THREE.Vector3(1, 0, 0)).normalize();
+                        }
+                        perpY.crossVectors(this.direction, perpX).normalize();
+
+                        const displacement = zigzag.radius * (1 - t * 0.5);
+                        const zigzagOffset = Math.sin(angle) * displacement;
+                        const zigzagOffset2 = Math.cos(angle) * displacement;
+
+                        basePos.add(perpX.clone().multiplyScalar(zigzagOffset));
+                        basePos.add(perpY.clone().multiplyScalar(zigzagOffset2));
+
+                        points.push(basePos);
+                    }
+
+                    zigzag.geometry.setFromPoints(points);
+                });
+            }
+
+            createImpact() {
+                // Big flash
+                this.impactFlash = new THREE.PointLight(0xd8b4fe, 8, 15);
+                this.impactFlash.position.copy(this.end);
+                scene.add(this.impactFlash);
+
+                // Burst of particles
+                for (let i = 0; i < 30; i++) {
+                    const particleGeo = new THREE.SphereGeometry(0.03 + Math.random() * 0.05, 8, 8);
+                    const particleMat = new THREE.MeshBasicMaterial({
+                        color: Math.random() > 0.3 ? 0xc084fc : 0xffffff,
+                        transparent: true,
+                        opacity: 1
+                    });
+                    const particle = new THREE.Mesh(particleGeo, particleMat);
+                    particle.position.copy(this.end);
+
+                    const spread = new THREE.Vector3(
+                        (Math.random() - 0.5),
+                        (Math.random() - 0.5),
+                        (Math.random() - 0.5)
+                    ).normalize();
+
+                    particle.velocity = spread.multiplyScalar(8 + Math.random() * 8);
+                    particle.life = 1;
+
+                    this.impactParticles.push(particle);
+                    scene.add(particle);
+                }
+
+                // Electric arcs at impact
+                for (let i = 0; i < 6; i++) {
+                    const arcPoints = [this.end.clone()];
+                    let currentPos = this.end.clone();
+
+                    const arcDir = new THREE.Vector3(
+                        (Math.random() - 0.5),
+                        (Math.random() - 0.5),
+                        (Math.random() - 0.5)
+                    ).normalize();
+
+                    for (let j = 0; j < 5; j++) {
+                        currentPos = currentPos.clone().add(
+                            arcDir.clone().multiplyScalar(0.3 + Math.random() * 0.3)
+                        );
+                        currentPos.add(new THREE.Vector3(
+                            (Math.random() - 0.5) * 0.3,
+                            (Math.random() - 0.5) * 0.3,
+                            (Math.random() - 0.5) * 0.3
+                        ));
+                        arcPoints.push(currentPos.clone());
+                    }
+
+                    const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
+                    const arcMat = new THREE.LineBasicMaterial({
+                        color: 0xe9d5ff,
+                        transparent: true,
+                        opacity: 0.9
+                    });
+                    const arc = new THREE.Line(arcGeo, arcMat);
+                    arc.life = 1;
+                    this.impactParticles.push({ mesh: arc, isArc: true, life: 1 });
+                    scene.add(arc);
+                }
+            }
+
+            spawnSparkle(position) {
+                const sparkleGeo = new THREE.SphereGeometry(0.02 + Math.random() * 0.03, 6, 6);
+                const sparkleMat = new THREE.MeshBasicMaterial({
+                    color: Math.random() > 0.5 ? 0xe9d5ff : 0xc084fc,
+                    transparent: true,
+                    opacity: 1
+                });
+                const sparkle = new THREE.Mesh(sparkleGeo, sparkleMat);
+                sparkle.position.copy(position);
+                sparkle.position.add(new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.3,
+                    (Math.random() - 0.5) * 0.3,
+                    (Math.random() - 0.5) * 0.3
+                ));
+                sparkle.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 2,
+                    (Math.random() - 0.5) * 2,
+                    (Math.random() - 0.5) * 2
+                );
+                sparkle.life = 0.5 + Math.random() * 0.3;
+                this.sparkles.push(sparkle);
+                scene.add(sparkle);
+            }
+
+            spawnTrailParticle(position) {
+                const size = 0.02 + Math.random() * 0.04;
+                const particleGeo = new THREE.SphereGeometry(size, 6, 6);
+                const colors = [0xe9d5ff, 0xc084fc, 0xa855f7, 0x7c3aed, 0xffffff];
+                const color = colors[Math.floor(Math.random() * colors.length)];
+
+                const particleMat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 1
+                });
+
+                const particle = new THREE.Mesh(particleGeo, particleMat);
+                particle.position.copy(position);
+                particle.position.add(new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.2,
+                    (Math.random() - 0.5) * 0.2,
+                    (Math.random() - 0.5) * 0.2
+                ));
+
+                // Velocity perpendicular to travel direction + some drift
+                const perpX = new THREE.Vector3(1, 0, 0);
+                const perpY = new THREE.Vector3(0, 1, 0);
+                if (Math.abs(this.direction.y) < 0.9) {
+                    perpX.crossVectors(this.direction, new THREE.Vector3(0, 1, 0)).normalize();
+                } else {
+                    perpX.crossVectors(this.direction, new THREE.Vector3(1, 0, 0)).normalize();
+                }
+                perpY.crossVectors(this.direction, perpX).normalize();
+
+                particle.velocity = new THREE.Vector3()
+                    .add(perpX.clone().multiplyScalar((Math.random() - 0.5) * 3))
+                    .add(perpY.clone().multiplyScalar((Math.random() - 0.5) * 3))
+                    .add(this.direction.clone().multiplyScalar(-2 - Math.random() * 2));
+
+                particle.life = 0.3 + Math.random() * 0.4;
+                particle.gravity = -5;
+
+                this.trailParticles.push(particle);
+                scene.add(particle);
+            }
+
+            update(deltaTime) {
+                this.time += deltaTime;
+
+                if (!this.hasHit) {
+                    // Move core along path
+                    this.travelProgress += this.travelSpeed * deltaTime;
+
+                    if (this.travelProgress >= this.length) {
+                        this.travelProgress = this.length;
+                        this.hasHit = true;
+                        this.createImpact();
+                    }
+
+                    // Update core position
+                    const corePos = this.start.clone().add(
+                        this.direction.clone().multiplyScalar(this.travelProgress)
+                    );
+                    this.coreOrb.position.copy(corePos);
+
+                    // Pulse the core
+                    const pulse = 1 + Math.sin(this.time * 20) * 0.15;
+                    this.coreOrb.scale.setScalar(pulse);
+
+                    // Update trail with wider spread for outer glow
+                    this.trailPoints.unshift(corePos.clone());
+                    if (this.trailPoints.length > this.maxTrailLength) {
+                        this.trailPoints.pop();
+                    }
+
+                    if (this.trailPoints.length > 1) {
+                        this.trailGeometry.setFromPoints(this.trailPoints);
+                        this.innerTrailGeometry.setFromPoints(this.trailPoints);
+                        this.outerTrailGeometry.setFromPoints(this.trailPoints);
+                    }
+
+                    // Spawn trail particles that fall off
+                    if (Math.random() < 0.8) {
+                        this.spawnTrailParticle(corePos);
+                    }
+
+                    // Update zigzags
+                    this.updateZigzags(corePos);
+
+                    // Spawn sparkles
+                    if (Math.random() < 0.5) {
+                        this.spawnSparkle(corePos);
+                    }
+
+                } else {
+                    // Fade out phase
+                    this.fadeLife -= deltaTime;
+                    const alpha = Math.max(0, this.fadeLife / 0.4);
+
+                    // Fade core
+                    this.coreOrb.material.opacity = alpha;
+                    this.innerCore.material.opacity = alpha;
+                    this.glowLayers.forEach(glow => {
+                        glow.material.opacity = alpha * 0.3;
+                    });
+                    this.coreLight.intensity = alpha * 3;
+
+                    // Fade trails
+                    this.trailMaterial.opacity = alpha * 0.9;
+                    this.innerTrailMaterial.opacity = alpha;
+                    this.outerTrailMaterial.opacity = alpha * 0.5;
+
+                    // Fade zigzags
+                    this.zigzags.forEach(z => {
+                        z.material.opacity = alpha * 0.7;
+                    });
+
+                    // Fade impact flash
+                    if (this.impactFlash) {
+                        this.impactFlash.intensity = alpha * 8;
+                    }
+
+                    // Update impact particles
+                    this.impactParticles.forEach(p => {
+                        if (p.isArc) {
+                            p.life -= deltaTime * 3;
+                            p.mesh.material.opacity = Math.max(0, p.life);
+                        } else {
+                            p.position.add(p.velocity.clone().multiplyScalar(deltaTime));
+                            p.velocity.multiplyScalar(0.95);
+                            p.life -= deltaTime * 2;
+                            p.material.opacity = Math.max(0, p.life);
+                            p.scale.setScalar(Math.max(0.1, p.life));
+                        }
+                    });
+                }
+
+                // Update trail particles (both during flight and fade)
+                this.trailParticles = this.trailParticles.filter(particle => {
+                    particle.velocity.y += particle.gravity * deltaTime;
+                    particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime));
+                    particle.life -= deltaTime;
+                    particle.material.opacity = Math.max(0, particle.life * 2);
+                    particle.scale.setScalar(Math.max(0.1, particle.life));
+
+                    if (particle.life <= 0) {
+                        scene.remove(particle);
+                        particle.geometry.dispose();
+                        particle.material.dispose();
+                        return false;
+                    }
+                    return true;
+                });
+
+                // Update sparkles
+                this.sparkles = this.sparkles.filter(sparkle => {
+                    sparkle.position.add(sparkle.velocity.clone().multiplyScalar(deltaTime));
+                    sparkle.velocity.multiplyScalar(0.95);
+                    sparkle.life -= deltaTime;
+                    sparkle.material.opacity = sparkle.life * 2;
+                    sparkle.scale.setScalar(sparkle.life);
+
+                    if (sparkle.life <= 0) {
+                        scene.remove(sparkle);
+                        sparkle.geometry.dispose();
+                        sparkle.material.dispose();
+                        return false;
+                    }
+                    return true;
+                });
+
+                return this.hasHit ? this.fadeLife > 0 : true;
+            }
+
+            destroy() {
+                scene.remove(this.coreOrb);
+                this.coreOrb.geometry.dispose();
+                this.coreOrb.material.dispose();
+                this.innerCore.geometry.dispose();
+                this.innerCore.material.dispose();
+                this.glowLayers.forEach(g => {
+                    g.geometry.dispose();
+                    g.material.dispose();
+                });
+
+                scene.remove(this.trail);
+                scene.remove(this.innerTrail);
+                scene.remove(this.outerTrail);
+                this.trailGeometry.dispose();
+                this.trailMaterial.dispose();
+                this.innerTrailGeometry.dispose();
+                this.innerTrailMaterial.dispose();
+                this.outerTrailGeometry.dispose();
+                this.outerTrailMaterial.dispose();
+
+                this.zigzags.forEach(z => {
+                    scene.remove(z.line);
+                    z.geometry.dispose();
+                    z.material.dispose();
+                });
+
+                this.sparkles.forEach(s => {
+                    scene.remove(s);
+                    s.geometry.dispose();
+                    s.material.dispose();
+                });
+
+                this.trailParticles.forEach(p => {
+                    scene.remove(p);
+                    p.geometry.dispose();
+                    p.material.dispose();
+                });
+
+                if (this.impactFlash) {
+                    scene.remove(this.impactFlash);
+                }
+
+                this.impactParticles.forEach(p => {
+                    if (p.isArc) {
+                        scene.remove(p.mesh);
+                        p.mesh.geometry.dispose();
+                        p.mesh.material.dispose();
+                    } else {
+                        scene.remove(p);
+                        p.geometry.dispose();
+                        p.material.dispose();
+                    }
+                });
+            }
+        }
+
+        // Create explosion from blob - EPIC VERSION
+        function explodeBlob(blob) {
+            const blobColor = blob.material.color;
+            const pos = blob.position.clone();
+            const scale = blob.baseScale;
+
+            // VORONOI FRAGMENTS - More of them, bigger, faster
+            const fragmentCount = 25 + Math.floor(Math.random() * 15);
+            for (let i = 0; i < fragmentCount; i++) {
+                const offset = new THREE.Vector3(
+                    (Math.random() - 0.5) * scale * 1.5,
+                    (Math.random() - 0.5) * scale * 1.5,
+                    (Math.random() - 0.5) * scale * 1.5
+                );
+                const fragPos = pos.clone().add(offset);
+
+                const velocity = offset.normalize().multiplyScalar(8 + Math.random() * 12);
+                velocity.y += 5 + Math.random() * 8;
+
+                const fragSize = 0.8 + Math.random() * 1.5;
+                state.explosions.push(new ExplosionFragment(fragPos, blobColor, velocity, fragSize));
+            }
+
+            // SHOCKWAVE RINGS - Multiple expanding rings
+            state.explosions.push(new ShockwaveRing(pos, blobColor));
+            setTimeout(() => {
+                if (state.explosions) {
+                    state.explosions.push(new ShockwaveRing(pos, 0xffffff));
+                }
+            }, 50);
+            setTimeout(() => {
+                if (state.explosions) {
+                    state.explosions.push(new ShockwaveRing(pos, 0xa855f7));
+                }
+            }, 100);
+
+            // SPARKS - Lots of trailing sparks
+            const sparkCount = 40;
+            for (let i = 0; i < sparkCount; i++) {
+                const sparkPos = pos.clone().add(new THREE.Vector3(
+                    (Math.random() - 0.5) * scale,
+                    (Math.random() - 0.5) * scale,
+                    (Math.random() - 0.5) * scale
+                ));
+
+                const sparkVel = new THREE.Vector3(
+                    (Math.random() - 0.5) * 20,
+                    Math.random() * 15,
+                    (Math.random() - 0.5) * 20
+                );
+
+                const sparkColor = Math.random() > 0.5 ? blobColor :
+                    Math.random() > 0.5 ? 0xa855f7 : 0xffffff;
+
+                state.explosions.push(new ExplosionSpark(sparkPos, sparkColor, sparkVel));
+            }
+
+            // MAIN FLASH - Big bright flash
+            state.explosions.push(new ExplosionFlash(pos, blobColor, 15, 20));
+            state.explosions.push(new ExplosionFlash(pos, 0xffffff, 10, 15));
+
+            // PURPLE MAGIC FLASH
+            state.explosions.push(new ExplosionFlash(pos, 0xa855f7, 8, 25));
+
+            // SECONDARY EXPLOSIONS - Delayed mini-explosions around the main one
+            for (let i = 0; i < 5; i++) {
+                const delay = 50 + Math.random() * 150;
+                const offsetPos = pos.clone().add(new THREE.Vector3(
+                    (Math.random() - 0.5) * 3,
+                    Math.random() * 2,
+                    (Math.random() - 0.5) * 3
+                ));
+
+                setTimeout(() => {
+                    if (!state.explosions) return;
+
+                    // Mini fragment burst
+                    for (let j = 0; j < 5; j++) {
+                        const vel = new THREE.Vector3(
+                            (Math.random() - 0.5) * 8,
+                            Math.random() * 6,
+                            (Math.random() - 0.5) * 8
+                        );
+                        state.explosions.push(new ExplosionFragment(offsetPos.clone(), blobColor, vel, 0.5));
+                    }
+
+                    // Mini flash
+                    state.explosions.push(new ExplosionFlash(offsetPos, 0xa855f7, 5, 8));
+
+                    // Mini sparks
+                    for (let j = 0; j < 8; j++) {
+                        const sparkVel = new THREE.Vector3(
+                            (Math.random() - 0.5) * 12,
+                            Math.random() * 10,
+                            (Math.random() - 0.5) * 12
+                        );
+                        state.explosions.push(new ExplosionSpark(offsetPos.clone(), 0xe9d5ff, sparkVel));
+                    }
+                }, delay);
+            }
+
+            // SCREEN SHAKE effect via camera
+            const originalPos = camera.position.clone();
+            let shakeTime = 0;
+            const shakeDuration = 0.3;
+            const shakeIntensity = 0.15;
+
+            function shake() {
+                shakeTime += 0.016;
+                if (shakeTime < shakeDuration) {
+                    const decay = 1 - (shakeTime / shakeDuration);
+                    camera.position.x = originalPos.x + (Math.random() - 0.5) * shakeIntensity * decay;
+                    camera.position.y = originalPos.y + (Math.random() - 0.5) * shakeIntensity * decay;
+                    requestAnimationFrame(shake);
+                }
+            }
+            shake();
+        }
+
+        // Spawn wave of blobs
+        function spawnWave() {
+            state.wave++;
+            const blobCount = 3 + state.wave * 2;
+
+            // Show wave announcement
+            const announcement = document.getElementById('wave-announcement');
+            announcement.textContent = `WAVE ${state.wave}`;
+            announcement.style.opacity = '1';
+            setTimeout(() => announcement.style.opacity = '0', 2000);
+
+            for (let i = 0; i < blobCount; i++) {
+                const angle = (i / blobCount) * Math.PI * 2;
+                const distance = 15 + Math.random() * 10;
+                const position = new THREE.Vector3(
+                    Math.cos(angle) * distance,
+                    1,
+                    Math.sin(angle) * distance
+                );
+                state.blobs.push(new Blob(position));
+            }
+
+            updateHUD();
+        }
+
+        // Raycasting for shooting
+        const raycaster = new THREE.Raycaster();
+
+        function shoot(event) {
+            // Calculate mouse position in normalized device coordinates
+            state.mousePos.x = ((event.clientX / window.innerWidth) * 2 - 1);
+            state.mousePos.y = (-(event.clientY / window.innerHeight) * 2 + 1);
+
+            raycaster.setFromCamera(state.mousePos, camera);
+
+            // Get all blob meshes
+            const blobMeshes = state.blobs.map(b => b.mesh);
+            const intersects = raycaster.intersectObjects(blobMeshes);
+
+            // Calculate end point for laser
+            let endPoint;
+            let hitBlob = null;
+
+            if (intersects.length > 0) {
+                endPoint = intersects[0].point;
+                hitBlob = intersects[0].object.userData.blob;
+            } else {
+                // Shoot to ground or far away
+                const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+                endPoint = new THREE.Vector3();
+                raycaster.ray.intersectPlane(groundPlane, endPoint);
+
+                if (!endPoint || endPoint.distanceTo(state.playerPos) > 50) {
+                    endPoint = raycaster.ray.at(50, new THREE.Vector3());
+                }
+            }
+
+            // Create laser from camera position
+            const laserStart = camera.position.clone();
+            const laser = new LaserBeam(laserStart, endPoint);
+            laser.targetBlob = hitBlob; // Store the target for when projectile arrives
+            state.lasers.push(laser);
+        }
+
+        function updateHUD() {
+            document.getElementById('score').textContent = `Score: ${state.score}`;
+            document.getElementById('blobs-remaining').textContent = `Blobs: ${state.blobs.length}`;
+        }
+
+        // Input handling
+        document.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (key in state.keys) state.keys[key] = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (key in state.keys) state.keys[key] = false;
+        });
+
+        document.addEventListener('click', shoot);
+
+        // Track mouse movement for camera look direction
+        document.addEventListener('mousemove', (e) => {
+            state.mousePos.x = (e.clientX / window.innerWidth) * 2 - 1;
+            state.mousePos.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Game loop
+        let lastTime = 0;
+
+        function animate(currentTime) {
+            requestAnimationFrame(animate);
+
+            const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.1);
+            lastTime = currentTime;
+
+            // Player movement - camera faces mouse
+            const moveSpeed = 8 * deltaTime;
+
+            // Calculate camera look direction from mouse
+            const sensitivity = MOUSE_SENSITIVITY;
+
+            const targetYaw = -state.mousePos.x * sensitivity * Math.PI;      // Full 360° possible
+            const targetPitch = state.mousePos.y * sensitivity * Math.PI / 2; // Limit vertical to ±90°
+
+            // Smooth camera rotation
+            state.playerAngle = targetYaw;
+            state.cameraPitch = targetPitch;
+
+            // Forward direction is where the camera is looking (horizontal only for movement)
+            const forward = new THREE.Vector3(
+                Math.sin(state.playerAngle),
+                0,
+                Math.cos(state.playerAngle)
+            );
+
+            // Right direction for strafing
+            const right = new THREE.Vector3(
+                Math.cos(state.playerAngle),
+                0,
+                -Math.sin(state.playerAngle)
+            );
+
+            // WASD movement relative to camera direction
+            if (state.keys.w) {
+                state.playerPos.add(forward.clone().multiplyScalar(moveSpeed));
+            }
+            if (state.keys.s) {
+                state.playerPos.sub(forward.clone().multiplyScalar(moveSpeed));
+            }
+            if (state.keys.a) {
+                state.playerPos.sub(right.clone().multiplyScalar(moveSpeed));
+            }
+            if (state.keys.d) {
+                state.playerPos.add(right.clone().multiplyScalar(moveSpeed));
+            }
+
+            // Update camera position
+            camera.position.copy(state.playerPos);
+            camera.position.y = 1.7;
+
+            // Camera looks in the direction based on mouse position
+            const lookTarget = new THREE.Vector3(
+                state.playerPos.x + Math.sin(state.playerAngle) * 10,
+                1.7 + Math.sin(state.cameraPitch) * 10,
+                state.playerPos.z + Math.cos(state.playerAngle) * 10
+            );
+            camera.lookAt(lookTarget);
+
+            // Update purple light to follow player
+            purpleLight.position.set(state.playerPos.x, 5, state.playerPos.z);
+
+            // Update blobs
+            state.blobs.forEach(blob => blob.update(deltaTime, state.playerPos));
+
+            // Update lasers
+            state.lasers = state.lasers.filter(laser => {
+                const wasHit = laser.hasHit;
+                const alive = laser.update(deltaTime);
+
+                // Check if laser just hit and has a target blob
+                if (!wasHit && laser.hasHit && laser.targetBlob) {
+                    const hitBlob = laser.targetBlob;
+                    // Make sure blob still exists
+                    if (state.blobs.includes(hitBlob)) {
+                        explodeBlob(hitBlob);
+                        hitBlob.destroy();
+                        state.blobs = state.blobs.filter(b => b !== hitBlob);
+                        state.score += 100;
+                        updateHUD();
+
+                        // Check for wave completion
+                        if (state.blobs.length === 0) {
+                            setTimeout(spawnWave, 2000);
+                        }
+                    }
+                    laser.targetBlob = null; // Clear so we don't process again
+                }
+
+                if (!alive) laser.destroy();
+                return alive;
+            });
+
+            // Update explosion fragments
+            state.explosions = state.explosions.filter(frag => {
+                const alive = frag.update(deltaTime);
+                if (!alive) frag.destroy();
+                return alive;
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        // Start game
+        spawnWave();
+        animate(0);
+    </script>
+</body>
+
+</html>
