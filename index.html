@@ -35,6 +35,7 @@
             height: 30px;
             pointer-events: none;
             z-index: 100;
+            display: none;
         }
 
         #crosshair::before,
@@ -158,10 +159,6 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.getElementById('game-container').appendChild(renderer.domElement);
-        const canvas = renderer.domElement;
-        canvas.addEventListener('click', () => {
-            canvas.style.cursor = 'none';
-        });
 
 
 
@@ -372,7 +369,7 @@
                     this.velocity.y *= -0.5;
                     this.velocity.x *= 0.8;
                     this.velocity.z *= 0.8;
-                    this.angularVelocity.multiplyScalar(0.2);
+                    this.angularVelocity.multiplyScalar(0.02);
                 }
 
                 this.life -= deltaTime * 0.5;
@@ -1158,43 +1155,45 @@
         const raycaster = new THREE.Raycaster();
 
         function shoot(event) {
-            // Calculate mouse position in normalized device coordinates
-            state.mousePos.x = ((event.clientX / window.innerWidth) * 2 - 1);
-            state.mousePos.y = (-(event.clientY / window.innerHeight) * 2 + 1);
+            // Update mouse position from click
+            state.mousePos.x = (event.clientX / window.innerWidth) * 2 - 1;
+            state.mousePos.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
-            const shootTarget = {
-                x: 0,
-                y: 0,
-            };
+            // Set raycaster using exact click position
+            raycaster.setFromCamera(state.mousePos, camera);
 
-            raycaster.setFromCamera(shootTarget, camera);
-
-            // Get all blob meshes
+            // Check for blob hits
             const blobMeshes = state.blobs.map(b => b.mesh);
-            const intersects = raycaster.intersectObjects(blobMeshes);
+            const intersects = raycaster.intersectObjects(blobMeshes, false);
 
-            // Calculate end point for laser
-            let endPoint;
             let hitBlob = null;
+            let endPoint;
 
             if (intersects.length > 0) {
+                // Direct hit on blob
                 endPoint = intersects[0].point;
                 hitBlob = intersects[0].object.userData.blob;
             } else {
-                // Shoot to ground or far away
-                const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-                endPoint = new THREE.Vector3();
-                raycaster.ray.intersectPlane(groundPlane, endPoint);
-
-                if (!endPoint || endPoint.distanceTo(state.playerPos) > 50) {
-                    endPoint = raycaster.ray.at(50, new THREE.Vector3());
+                // No blob hit: try to hit ground
+                const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y=0 plane
+                const intersection = new THREE.Vector3();
+                if (raycaster.ray.intersectPlane(groundPlane, intersection)) {
+                    // Ground hit within reasonable range
+                    if (intersection.distanceTo(camera.position) < 80) {
+                        endPoint = intersection;
+                    } else {
+                        // Ground too far (e.g. looking almost straight up) → shoot far in direction
+                        endPoint = camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(80));
+                    }
+                } else {
+                    // Looking straight up (no ground intersection) → shoot far upward
+                    endPoint = camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(80));
                 }
             }
 
-            // Create laser from camera position
             const laserStart = camera.position.clone();
             const laser = new LaserBeam(laserStart, endPoint);
-            laser.targetBlob = hitBlob; // Store the target for when projectile arrives
+            laser.targetBlob = hitBlob;
             state.lasers.push(laser);
         }
 
@@ -1244,7 +1243,8 @@
             const sensitivity = MOUSE_SENSITIVITY;
 
             const targetYaw = -state.mousePos.x * sensitivity * Math.PI;      // Full 360° possible
-            const targetPitch = state.mousePos.y * sensitivity * Math.PI / 2; // Limit vertical to ±90°
+            let targetPitch = state.mousePos.y * sensitivity * Math.PI / 2;
+            targetPitch = Math.max(-Math.PI / 2 + 0.0001, Math.min(Math.PI / 2 - 0.0001, targetPitch));
 
             // Smooth camera rotation
             state.playerAngle = targetYaw;
