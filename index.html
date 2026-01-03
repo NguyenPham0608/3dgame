@@ -114,9 +114,11 @@
         <h1>⚡ BLOB ZAPPER ⚡</h1>
         <div id="score">Score: 0</div>
         <div id="blobs-remaining">Blobs: 0</div>
+        <div id="level">Level: 1</div>
+        <div id="next-upgrade">Next: 1000 pts (Press U)</div>
     </div>
     <div id="instructions">
-        WASD to move • Mouse to aim • Click to shoot • Zap all the blobs!
+        WASD to move • Mouse to aim • Click to shoot • U to upgrade • Zap all the blobs!
     </div>
     <div id="wave-announcement"></div>
 
@@ -133,7 +135,7 @@
 
         // Game state
         const state = {
-            score: 0,
+            score: 120000,
             wave: 0,
             blobs: [],
             explosions: [],
@@ -141,7 +143,10 @@
             keys: { w: false, a: false, s: false, d: false },
             playerAngle: 0,
             playerPos: new THREE.Vector3(0, 1.5, 0),
-            mousePos: new THREE.Vector2()
+            mousePos: new THREE.Vector2(),
+            level: 1,
+            upgradeCosts: [1000, 3000, 6000, 12000],
+            cameraPitch: 0
         };
 
         const MOUSE_SENSITIVITY = 2.5;
@@ -521,7 +526,7 @@
 
         // Electric laser beam - spell-like with traveling core
         class LaserBeam {
-            constructor(start, end) {
+            constructor(start, end, config) {
                 this.start = start.clone();
                 this.end = end.clone();
                 this.direction = new THREE.Vector3().subVectors(end, start);
@@ -529,15 +534,22 @@
                 this.direction.normalize();
 
                 this.travelProgress = 0;
-                this.travelSpeed = 80; // Units per second
+                this.travelSpeed = config.travelSpeed; // Units per second
                 this.hasHit = false;
-                this.fadeLife = 0.4;
+                this.originalFadeLife = config.fadeDuration || 0.4;
+                this.fadeLife = this.originalFadeLife;
                 this.time = 0;
+
+                this.config = config;
+                this.maxTrailLength = config.trailLength;
+                this.initialCoreLightInt = 3 * config.glowIntensity;
+                const baseOpacities = [0.5, 0.3, 0.15];
+                this.glowInitialOpacities = baseOpacities.map(op => op * config.glowIntensity);
 
                 // Glowing core orb - the traveling spell projectile
                 const coreGeometry = new THREE.SphereGeometry(0.15, 16, 16);
                 const coreMaterial = new THREE.MeshBasicMaterial({
-                    color: 0xd8b4fe,
+                    color: config.primaryColor,
                     transparent: true,
                     opacity: 1
                 });
@@ -548,7 +560,7 @@
                 // Inner bright core
                 const innerGeometry = new THREE.SphereGeometry(0.08, 12, 12);
                 const innerMaterial = new THREE.MeshBasicMaterial({
-                    color: 0xffffff,
+                    color: config.coreColor,
                     transparent: true,
                     opacity: 1
                 });
@@ -558,15 +570,12 @@
                 // Outer glow layers
                 this.glowLayers = [];
                 const glowSizes = [0.25, 0.35, 0.5];
-                const glowOpacities = [0.5, 0.3, 0.15];
-                const glowColors = [0xc084fc, 0xa855f7, 0x7c3aed];
-
                 glowSizes.forEach((size, i) => {
                     const glowGeo = new THREE.SphereGeometry(size, 12, 12);
                     const glowMat = new THREE.MeshBasicMaterial({
-                        color: glowColors[i],
+                        color: config.glowColors[i],
                         transparent: true,
-                        opacity: glowOpacities[i],
+                        opacity: baseOpacities[i] * config.glowIntensity,
                         side: THREE.BackSide
                     });
                     const glow = new THREE.Mesh(glowGeo, glowMat);
@@ -575,17 +584,16 @@
                 });
 
                 // Point light attached to core
-                this.coreLight = new THREE.PointLight(0xa855f7, 3, 8);
+                this.coreLight = new THREE.PointLight(config.accentColor, this.initialCoreLightInt, 8);
                 this.coreOrb.add(this.coreLight);
 
                 // Trail beam that follows behind the core - ENHANCED
                 this.trailPoints = [];
-                this.maxTrailLength = 50;
 
                 // Main bright trail
                 this.trailGeometry = new THREE.BufferGeometry();
                 this.trailMaterial = new THREE.LineBasicMaterial({
-                    color: 0xd8b4fe,
+                    color: config.primaryColor,
                     transparent: true,
                     opacity: 0.9
                 });
@@ -595,7 +603,7 @@
                 // Inner trail (white hot core)
                 this.innerTrailGeometry = new THREE.BufferGeometry();
                 this.innerTrailMaterial = new THREE.LineBasicMaterial({
-                    color: 0xffffff,
+                    color: config.coreColor,
                     transparent: true,
                     opacity: 1
                 });
@@ -605,7 +613,7 @@
                 // Outer glow trail
                 this.outerTrailGeometry = new THREE.BufferGeometry();
                 this.outerTrailMaterial = new THREE.LineBasicMaterial({
-                    color: 0x7c3aed,
+                    color: config.glowColors[2],
                     transparent: true,
                     opacity: 0.5
                 });
@@ -635,7 +643,7 @@
                         points: [],
                         geometry: new THREE.BufferGeometry(),
                         material: new THREE.LineBasicMaterial({
-                            color: i % 2 === 0 ? 0xe9d5ff : 0x7c3aed,
+                            color: i % 2 === 0 ? this.config.primaryColor : this.config.glowColors[2],
                             transparent: true,
                             opacity: 0.7
                         }),
@@ -692,7 +700,7 @@
 
             createImpact() {
                 // Big flash
-                this.impactFlash = new THREE.PointLight(0xd8b4fe, 8, 15);
+                this.impactFlash = new THREE.PointLight(this.config.primaryColor, 8 * this.config.glowIntensity, 15);
                 this.impactFlash.position.copy(this.end);
                 scene.add(this.impactFlash);
 
@@ -700,7 +708,7 @@
                 for (let i = 0; i < 30; i++) {
                     const particleGeo = new THREE.SphereGeometry(0.03 + Math.random() * 0.05, 8, 8);
                     const particleMat = new THREE.MeshBasicMaterial({
-                        color: Math.random() > 0.3 ? 0xc084fc : 0xffffff,
+                        color: Math.random() > 0.3 ? this.config.glowColors[0] : this.config.coreColor,
                         transparent: true,
                         opacity: 1
                     });
@@ -745,7 +753,7 @@
 
                     const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPoints);
                     const arcMat = new THREE.LineBasicMaterial({
-                        color: 0xe9d5ff,
+                        color: this.config.primaryColor,
                         transparent: true,
                         opacity: 0.9
                     });
@@ -759,7 +767,7 @@
             spawnSparkle(position) {
                 const sparkleGeo = new THREE.SphereGeometry(0.02 + Math.random() * 0.03, 6, 6);
                 const sparkleMat = new THREE.MeshBasicMaterial({
-                    color: Math.random() > 0.5 ? 0xe9d5ff : 0xc084fc,
+                    color: Math.random() > 0.5 ? this.config.primaryColor : this.config.glowColors[0],
                     transparent: true,
                     opacity: 1
                 });
@@ -783,7 +791,7 @@
             spawnTrailParticle(position) {
                 const size = 0.02 + Math.random() * 0.04;
                 const particleGeo = new THREE.SphereGeometry(size, 6, 6);
-                const colors = [0xe9d5ff, 0xc084fc, 0xa855f7, 0x7c3aed, 0xffffff];
+                const colors = [this.config.primaryColor, this.config.glowColors[0], this.config.accentColor, this.config.glowColors[2], this.config.coreColor];
                 const color = colors[Math.floor(Math.random() * colors.length)];
 
                 const particleMat = new THREE.MeshBasicMaterial({
@@ -858,8 +866,14 @@
                     }
 
                     // Spawn trail particles that fall off
-                    if (Math.random() < 0.8) {
+                    const particleChance = this.config.particleEmissionRate || 0.8;
+                    if (Math.random() < particleChance) {
                         this.spawnTrailParticle(corePos);
+                        // Extra emissions for thick beam (Green Nuke)
+                        if (this.config.level === 5) {
+                            this.spawnTrailParticle(corePos.clone().add(this.direction.clone().multiplyScalar(-0.5)));
+                            if (Math.random() < 0.7) this.spawnTrailParticle(corePos.clone().add(this.direction.clone().multiplyScalar(-1)));
+                        }
                     }
 
                     // Update zigzags
@@ -873,15 +887,15 @@
                 } else {
                     // Fade out phase
                     this.fadeLife -= deltaTime;
-                    const alpha = Math.max(0, this.fadeLife / 0.4);
+                    const alpha = Math.max(0, this.fadeLife / this.originalFadeLife);
 
                     // Fade core
                     this.coreOrb.material.opacity = alpha;
                     this.innerCore.material.opacity = alpha;
-                    this.glowLayers.forEach(glow => {
-                        glow.material.opacity = alpha * 0.3;
+                    this.glowLayers.forEach((glow, i) => {
+                        glow.material.opacity = alpha * this.glowInitialOpacities[i];
                     });
-                    this.coreLight.intensity = alpha * 3;
+                    this.coreLight.intensity = alpha * this.initialCoreLightInt;
 
                     // Fade trails
                     this.trailMaterial.opacity = alpha * 0.9;
@@ -895,7 +909,7 @@
 
                     // Fade impact flash
                     if (this.impactFlash) {
-                        this.impactFlash.intensity = alpha * 8;
+                        this.impactFlash.intensity = alpha * 8 * this.config.glowIntensity;
                     }
 
                     // Update impact particles
@@ -1008,13 +1022,13 @@
         }
 
         // Create explosion from blob - EPIC VERSION
-        function explodeBlob(blob) {
+        function explodeBlob(blob, shakeIntensity = 0.15) {
             const blobColor = blob.material.color;
             const pos = blob.position.clone();
             const scale = blob.baseScale;
 
             // VORONOI FRAGMENTS - More of them, bigger, faster
-            const fragmentCount = 25 + Math.floor(Math.random() * 15);
+            const fragmentCount = Math.floor(Math.random() * 15);
             for (let i = 0; i < fragmentCount; i++) {
                 const offset = new THREE.Vector3(
                     (Math.random() - 0.5) * scale * 1.5,
@@ -1108,22 +1122,7 @@
                 }, delay);
             }
 
-            // SCREEN SHAKE effect via camera
-            const originalPos = camera.position.clone();
-            let shakeTime = 0;
-            const shakeDuration = 0.3;
-            const shakeIntensity = 0.15;
-
-            function shake() {
-                shakeTime += 0.016;
-                if (shakeTime < shakeDuration) {
-                    const decay = 1 - (shakeTime / shakeDuration);
-                    camera.position.x = originalPos.x + (Math.random() - 0.5) * shakeIntensity * decay;
-                    camera.position.y = originalPos.y + (Math.random() - 0.5) * shakeIntensity * decay;
-                    requestAnimationFrame(shake);
-                }
-            }
-            shake();
+            doShake(shakeIntensity);
         }
 
         // Spawn wave of blobs
@@ -1154,58 +1153,183 @@
         // Raycasting for shooting
         const raycaster = new THREE.Raycaster();
 
-        function shoot(event) {
-            // Update mouse position from click
-            state.mousePos.x = (event.clientX / window.innerWidth) * 2 - 1;
-            state.mousePos.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        const laserConfigs = {
+            1: {
+                numRays: 1,
+                primaryColor: 0xd8b4fe,
+                coreColor: 0xffffff,
+                accentColor: 0xa855f7,
+                glowColors: [0xc084fc, 0xa855f7, 0x7c3aed],
+                trailLength: 50,
+                travelSpeed: 80,
+                damageMultiplier: 1,
+                blastRadius: 0,
+                spreadAngle: 0,
+                glowIntensity: 1,
+                shakeIntensity: undefined,
+                name: '⚡ Purple Ray'
+            },
+            2: {
+                numRays: 3,
+                primaryColor: 0xfcd34d,
+                coreColor: 0xff6b35,
+                accentColor: 0xf97316,
+                glowColors: [0xfbb041, 0xf97316, 0xea580c],
+                trailLength: 40,
+                travelSpeed: 100,
+                damageMultiplier: 1,
+                blastRadius: 0,
+                spreadAngle: 0.17,  // ~10° total spread
+                glowIntensity: 1.2,
+                shakeIntensity: undefined,
+                name: '🔥 Triple Orange'
+            },
+            3: {
+                numRays: 1,
+                primaryColor: 0x60a5fa,
+                coreColor: 0x3b82f6,
+                accentColor: 0x1d4ed8,
+                glowColors: [0x93c5fd, 0x60a5fa, 0x2563eb],
+                trailLength: 70,
+                travelSpeed: 120,
+                damageMultiplier: 2,
+                blastRadius: 0,
+                spreadAngle: 0,
+                glowIntensity: 1.5,
+                shakeIntensity: undefined,
+                name: '💙 Blue Lance'
+            },
+            4: {
+                numRays: 5,
+                primaryColor: 0xf87171,
+                coreColor: 0xef4444,
+                accentColor: 0xdc2626,
+                glowColors: [0xfca5a5, 0xf87171, 0xdc2626],
+                trailLength: 30,
+                travelSpeed: 90,
+                damageMultiplier: 1,
+                blastRadius: 2,
+                spreadAngle: 0.52,  // ~30° total spread
+                glowIntensity: 1,
+                shakeIntensity: undefined,
+                name: '💥 Red Barrage'
+            },
+            5: {
+                numRays: 1,
+                primaryColor: 0x86efac,
+                coreColor: 0x22c55e,
+                accentColor: 0x16a34a,
+                glowColors: [0xa7f3d0, 0x22c55e, 0x15803d],
+                trailLength: 100,
+                travelSpeed: 60,
+                damageMultiplier: 3,
+                blastRadius: 12,
+                spreadAngle: 0,
+                glowIntensity: 6.5,
+                fadeDuration: 6.5,
+                shakeIntensity: 0.35,
+                particleEmissionRate: 1.0,  // Always emit per frame
+                level: 5,
+                name: '☢️ Green Nuke'
+            },
+        };
 
-            // Set raycaster using exact click position
-            raycaster.setFromCamera(state.mousePos, camera);
-
-            // Check for blob hits
-            const blobMeshes = state.blobs.map(b => b.mesh);
-            const intersects = raycaster.intersectObjects(blobMeshes, false);
-
+        function getTargetInfo(rayOrigin, rayDir, blobMeshes) {
+            const rc = new THREE.Raycaster(rayOrigin, rayDir);
+            const intersects = rc.intersectObjects(blobMeshes, false);
             let hitBlob = null;
             let endPoint;
-
             if (intersects.length > 0) {
-                // Direct hit on blob
                 endPoint = intersects[0].point;
                 hitBlob = intersects[0].object.userData.blob;
             } else {
-                // No blob hit: try to hit ground
-                const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y=0 plane
+                const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
                 const intersection = new THREE.Vector3();
-                if (raycaster.ray.intersectPlane(groundPlane, intersection)) {
-                    // Ground hit within reasonable range
-                    if (intersection.distanceTo(camera.position) < 80) {
+                if (rc.ray.intersectPlane(groundPlane, intersection)) {
+                    if (intersection.distanceTo(rayOrigin) < 80) {
                         endPoint = intersection;
                     } else {
-                        // Ground too far (e.g. looking almost straight up) → shoot far in direction
-                        endPoint = camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(80));
+                        endPoint = rayOrigin.clone().add(rayDir.clone().multiplyScalar(80));
                     }
                 } else {
-                    // Looking straight up (no ground intersection) → shoot far upward
-                    endPoint = camera.position.clone().add(raycaster.ray.direction.clone().multiplyScalar(80));
+                    endPoint = rayOrigin.clone().add(rayDir.clone().multiplyScalar(80));
                 }
             }
+            return { endPoint, hitBlob };
+        }
 
-            const laserStart = camera.position.clone();
-            const laser = new LaserBeam(laserStart, endPoint);
-            laser.targetBlob = hitBlob;
-            state.lasers.push(laser);
+        function upgrade() {
+            const costIndex = state.level - 1;
+            const nextCost = state.level < 5 ? state.upgradeCosts[costIndex] : Infinity;
+            if (state.score >= nextCost) {
+                state.score -= nextCost;
+                state.level++;
+                updateHUD();
+                const announcement = document.getElementById('wave-announcement');
+                announcement.textContent = `${laserConfigs[state.level].name} UNLOCKED!`;
+                announcement.style.opacity = '1';
+                setTimeout(() => announcement.style.opacity = '0', 2000);
+            }
+        }
+
+        function doShake(intensity = 0.15, duration = 0.3) {
+            const originalPos = camera.position.clone();
+            let shakeTime = 0;
+            function shakeLoop() {
+                shakeTime += 0.016;
+                if (shakeTime < duration) {
+                    const decay = 1 - (shakeTime / duration);
+                    camera.position.x = originalPos.x + (Math.random() - 0.5) * intensity * decay;
+                    camera.position.y = originalPos.y + (Math.random() - 0.5) * intensity * decay;
+                    requestAnimationFrame(shakeLoop);
+                } else {
+                    camera.position.copy(originalPos);
+                }
+            }
+            shakeLoop();
+        }
+
+        function shoot(event) {
+            state.mousePos.x = (event.clientX / window.innerWidth) * 2 - 1;
+            state.mousePos.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(state.mousePos, camera);
+            const blobMeshes = state.blobs.map(b => b.mesh);
+            const mainRayOrigin = camera.position.clone();
+            const mainRayDir = raycaster.ray.direction.clone();
+            const config = laserConfigs[state.level];
+            for (let rayIdx = 0; rayIdx < config.numRays; rayIdx++) {
+                let rayDir = mainRayDir.clone();
+                if (config.numRays > 1 && config.spreadAngle > 0) {
+                    const numSteps = Math.max(1, config.numRays - 1);
+                    const stepAngle = config.spreadAngle / numSteps;
+                    const offsetAngle = (rayIdx - (config.numRays - 1) / 2) * stepAngle;
+                    const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), offsetAngle);
+                    rayDir.applyQuaternion(quat);
+                }
+                const { endPoint, hitBlob } = getTargetInfo(mainRayOrigin, rayDir, blobMeshes);
+                const laser = new LaserBeam(mainRayOrigin, endPoint, config);
+                laser.targetBlob = hitBlob;
+                state.lasers.push(laser);
+            }
         }
 
         function updateHUD() {
             document.getElementById('score').textContent = `Score: ${state.score}`;
             document.getElementById('blobs-remaining').textContent = `Blobs: ${state.blobs.length}`;
+            document.getElementById('level').textContent = `Level: ${state.level}`;
+            const costIndex = state.level - 1;
+            const nextCost = state.level < 5 ? state.upgradeCosts[costIndex] : Infinity;
+            document.getElementById('next-upgrade').textContent = nextCost === Infinity ? 'MAX LEVEL ACHIEVED!' : `Next: ${nextCost} pts (U)`;
         }
 
         // Input handling
         document.addEventListener('keydown', (e) => {
             const key = e.key.toLowerCase();
             if (key in state.keys) state.keys[key] = true;
+            if (key === 'u') {
+                e.preventDefault();
+                upgrade();
+            }
         });
 
         document.addEventListener('keyup', (e) => {
@@ -1306,10 +1430,29 @@
                     const hitBlob = laser.targetBlob;
                     // Make sure blob still exists
                     if (state.blobs.includes(hitBlob)) {
-                        explodeBlob(hitBlob);
-                        hitBlob.destroy();
-                        state.blobs = state.blobs.filter(b => b !== hitBlob);
-                        state.score += 100;
+                        const multiplier = laser.config ? laser.config.damageMultiplier : 1;
+                        const baseScore = 100 * multiplier;
+                        const shakeInt = laser.config ? (laser.config.shakeIntensity || 0.15) : 0.15;
+                        if (laser.config && laser.config.blastRadius > 0) {
+                            const blastPos = laser.end.clone();
+                            const radius = laser.config.blastRadius;
+                            const toDestroy = [];
+                            state.blobs.forEach(blob => {
+                                if (blob.position.distanceTo(blastPos) <= radius) {
+                                    explodeBlob(blob, 0);
+                                    blob.destroy();
+                                    toDestroy.push(blob);
+                                    state.score += baseScore;
+                                }
+                            });
+                            state.blobs = state.blobs.filter(b => !toDestroy.includes(b));
+                            doShake(shakeInt);
+                        } else {
+                            explodeBlob(hitBlob, shakeInt);
+                            hitBlob.destroy();
+                            state.score += baseScore;
+                            state.blobs = state.blobs.filter(b => b !== hitBlob);
+                        }
                         updateHUD();
 
                         // Check for wave completion
